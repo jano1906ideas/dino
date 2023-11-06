@@ -31,6 +31,7 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
+from mask_const import get_division_masks_for_model, sample_masks
 
 
 class GaussianBlur(object):
@@ -607,7 +608,7 @@ class MultiCropWrapper(nn.Module):
         self.backbone = backbone
         self.head = head
 
-    def forward(self, x):
+    def forward(self, x, sample_divisions=False):
         # convert to list
         if not isinstance(x, list):
             x = [x]
@@ -617,7 +618,14 @@ class MultiCropWrapper(nn.Module):
         )[1], 0)
         start_idx, output = 0, torch.empty(0).to(x[0].device)
         for end_idx in idx_crops:
-            _out = self.backbone(torch.cat(x[start_idx: end_idx]))
+            K, masks = None, None
+            if sample_divisions:
+                division_masks = get_division_masks_for_model(self.backbone, x[start_idx].shape[-2:])
+                K = random.randint(0, len(self.backbone.blocks))
+                M = random.choice(list(division_masks.keys()))
+                masks = sample_masks(division_masks, M)
+
+            _out = self.backbone(torch.cat(x[start_idx: end_idx]), K, masks)
             # The output is a tuple with XCiT model. See:
             # https://github.com/facebookresearch/xcit/blob/master/xcit.py#L404-L405
             if isinstance(_out, tuple):

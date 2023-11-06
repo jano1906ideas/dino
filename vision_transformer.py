@@ -193,6 +193,26 @@ class VisionTransformer(nn.Module):
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
 
+    def split_input(self, x, masks, include_cls=True):
+        assert masks is not None
+        masks = [torch.tensor(mask).flatten() for mask in masks]
+        
+        if len(masks[0]) == x.shape[1]:
+            assert not include_cls
+        elif len(masks[0]) == x.shape[1]-1:
+            if include_cls:
+                masks = [torch.cat([torch.ones(1, dtype=bool, device=mask.device), mask], dim=0) for mask in masks]
+            else:
+                masks = [torch.cat([torch.zeros(1, dtype=bool, device=mask.device), mask], dim=0) for mask in masks]
+        else:
+            assert False, f"{len(masks[0])}, {x.shape}"
+    
+        xs = []
+        for mask in masks:
+            xs.append(x[:, mask].reshape(x.shape[0], -1, x.shape[-1]))
+            
+        return xs
+    
     def prepare_tokens(self, x):
         B, nc, w, h = x.shape
         x = self.patch_embed(x)  # patch linear embedding
@@ -206,7 +226,46 @@ class VisionTransformer(nn.Module):
 
         return self.pos_drop(x)
 
-    def forward(self, x):
+    def comp_forward_afterK(self, x, K, masks):
+        B = x.shape[0]
+        x = self.prepare_tokens(x)
+
+        def subencoder(x):
+            for blk in self.blocks[:K]:
+                x = blk(x)
+            return x
+        
+        if K > 0 and masks is not None:
+            xs = self.split_input(x, masks)
+
+            if all(x.shape[1] == xs[0].shape[1] for x in xs):
+                xs = subencoder(torch.cat(xs, dim=0))
+                xs = xs.reshape(xs.shape[0]//B, B, *xs.shape[1:])
+                
+                xs_cls = xs[:, :, 0, :]
+                xs_feats = xs[:, :, 1:, :]
+                xs_feats = xs_feats.transpose(0,1)
+                xs_feats = xs_feats.flatten(1,2)
+                x = torch.cat([xs_cls.mean(dim=0).unsqueeze(1), xs_feats], dim=1)
+            else:
+                xs = [subencoder(x) for x in xs]
+
+                xs_cls = torch.stack([x[:, [0], :] for x in xs])
+                xs_feats = [x[:, 1:, :] for x in xs]
+                x = torch.cat([xs_cls.mean(dim=0)] + xs_feats, dim=1)
+        else:
+            x = subencoder(x)
+        
+        for blk in self.blocks[K:]:
+            x = blk(x)
+
+        x = self.norm(x)
+        return x[:, 0]
+
+    def forward(self, x, K=None, masks=None):
+        if K is not None and masks is not None:
+            return self.comp_forward_afterK(x, K, masks)
+        
         x = self.prepare_tokens(x)
         for blk in self.blocks:
             x = blk(x)

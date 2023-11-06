@@ -126,6 +126,11 @@ def get_args_parser():
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
+
+    parser.add_argument('--finetune', default=None, type=str,
+        help="Path to model checkpoint to finetune")
+    parser.add_argument('--sample_divisions', default=False, action="store_true",
+        help="Sample K and M during training")
     return parser
 
 
@@ -251,8 +256,19 @@ def train_dino(args):
                                                args.epochs, len(data_loader))
     print(f"Loss, optimizer and schedulers ready.")
 
-    # ============ optionally resume training ... ============
     to_restore = {"epoch": 0}
+    if args.finetune is not None:
+        utils.restart_from_checkpoint(
+        args.finetune,
+        run_variables=to_restore,
+        student=student,
+        teacher=teacher,
+        optimizer=optimizer,
+        fp16_scaler=fp16_scaler,
+        dino_loss=dino_loss,
+    )
+        
+    # ============ optionally resume training ... ============
     utils.restart_from_checkpoint(
         os.path.join(args.output_dir, "checkpoint.pth"),
         run_variables=to_restore,
@@ -316,7 +332,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
-            student_output = student(images)
+            
+            student_output = student(images, args.sample_divisions)
             loss = dino_loss(student_output, teacher_output, epoch)
 
         if not math.isfinite(loss.item()):
